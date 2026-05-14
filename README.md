@@ -1,59 +1,62 @@
-# Hypervisor VM Graceful Shutdown Script
+# Hypervisor VM Shutdown Script
 
-A production-grade Windows CMD/BAT script for Windows Server 2022 that gracefully shuts down all running virtual machines on both Oracle VirtualBox and VMware Workstation/Player, then cleanly shuts down the Windows host.
+Production-grade Windows batch script that gracefully shuts down all running guest VMs across multiple hypervisors, then shuts down the Windows host. Designed for unattended lab setups, UPS-triggered shutdowns, and data center maintenance.
 
-## What It Does
+## Supported Hypervisors
 
-1. **Auto-elevates** to Administrator (via VBScript if not already elevated)
-2. **Discovers** VBoxManage and vmrun executables automatically
-3. **Builds inventory** of all running VMs across both hypervisors
-4. **Gracefully shuts down** each VM via ACPI (VirtualBox) or `vmrun stop soft` (VMware)
-5. **Polls** every 5 seconds until VM is confirmed off (configurable)
-6. **Force power-off** on timeout (optional, configurable)
-7. **Final verification** that nothing is still running
-8. **Summary report** with success/fail/timeout counts
-9. **Gracefully shuts down** the Windows host
+- **Hyper-V** (Windows Server built-in)
+- **Oracle VirtualBox**
+- **VMware Workstation / VMware Player**
 
-## Usage
+## Quick Start
+
+1. **Download** `hypervisor-vm-shutdown.cmd`
+2. **Run as Administrator** — the script auto-elevates if you forget
+3. That's it. It finds your VMs, shuts them down gracefully, then shuts down the host.
 
 ```cmd
 hypervisor-vm-shutdown.cmd
 ```
 
-Run as Administrator — the script auto-elevates if needed.
-
 ## Configuration
 
-All settings are at the top of the script:
+Edit the variables at the top of the script:
 
-| Variable | Default | Purpose |
+| Variable | Default | Description |
 |---|---|---|
-| `CFG_SHUTDOWN_TIMEOUT` | `300` | Seconds to wait per VM before timeout |
-| `CFG_FORCE_SHUTDOWN` | `YES` | Hard power-off on timeout? (`YES`/`NO`) |
-| `CFG_LOG_DIR` | `C:\HypervisorShutdownLogs` | Where timestamped logs go |
-| `CFG_LOG_RETENTION_DAYS` | `30` | Auto-purge old logs |
-| `CFG_HOST_SHUTDOWN_DELAY` | `10` | Countdown seconds before host power-off |
-| `CFG_CHECK_INTERVAL` | `5` | Polling interval for VM status checks |
+| `CFG_SHUTDOWN_TIMEOUT` | `300` | Seconds to wait per VM before timing out |
+| `CFG_FORCE_SHUTDOWN` | `YES` | Force power-off VMs that don't shut down in time |
+| `CFG_LOG_DIR` | `C:\HypervisorShutdownLogs` | Where timestamped logs are stored |
+| `CFG_LOG_RETENTION_DAYS` | `30` | Auto-delete logs older than this |
+| `CFG_HOST_SHUTDOWN_DELAY` | `10` | Countdown before host shutdown |
+| `CFG_CHECK_INTERVAL` | `5` | How often to poll VM state (seconds) |
 | `CFG_COLOR_OUTPUT` | `YES` | ANSI-coloured console output |
 
-## Platform Support
+## How It Works
 
-- Windows Server 2022 (primary target)
-- Windows Server 2016 / 2019 / 2025
-- Windows 10 / 11 with VirtualBox and/or VMware
+1. **Auto-elevates** to Administrator via VBScript UAC prompt
+2. **Discovers** available hypervisors (Hyper-V, VirtualBox, VMware)
+3. **Builds inventory** of all running VMs across every detected hypervisor
+4. **Shuts down each VM** gracefully:
+   - Hyper-V: `Stop-VM -TurnOff:$false` (Integration Services)
+   - VirtualBox: `VBoxManage controlvm <name> acpipowerbutton`
+   - VMware: `vmrun stop <vmx> soft`
+5. **Polls** each VM until it powers off (or timeout + force-off)
+6. **Verifies** no VMs remain running
+7. **Prints summary** and shuts down the host
 
-## Hypervisor Support
+## Error Resilience
 
-- **Oracle VirtualBox** — detected via VBoxManage.exe
-- **VMware Workstation** — detected via vmrun.exe
-- **VMware Player** — detected via vmrun.exe (auto-selects `-T player`)
+- One VM failing doesn't block others from shutting down
+- Race-condition safe: detects if a VM was already shut down externally
+- All failures are logged with timestamps
+- Summary report shows per-VM outcome (success/forced/failed/timed out)
 
-## Logs
+## Requirements
 
-Timestamped logs are written to `CFG_LOG_DIR` with the format:
-`shutdown_YYYY-MM-DD_HH-MM-SS.log`
-
-Logs older than `CFG_LOG_RETENTION_DAYS` are automatically purged on each run.
+- Windows Server 2016 / 2019 / 2022 / 2025 (also works on Windows 10/11)
+- Administrator privileges
+- At least one supported hypervisor installed
 
 ## License
 

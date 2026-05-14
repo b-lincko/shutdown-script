@@ -3,10 +3,10 @@ setlocal enabledelayedexpansion
 :: ============================================================================
 ::  Hypervisor VM Graceful Shutdown & Host Shutdown Script
 ::  Platform:       Windows Server 2022 (also 2016/2019/2025)
-::  Compatibility:  Oracle VirtualBox + VMware Workstation/Player
+::  Compatibility:  Hyper-V + Oracle VirtualBox + VMware Workstation/Player
 ::  Purpose:        Gracefully shut down all running guest VMs, then the host
 ::  Usage:          Run as Administrator (auto-elevates if not elevated)
-::  Version:        2.0.0
+::  Version:        2.1.0
 ::  License:        MIT
 :: ============================================================================
 
@@ -204,10 +204,31 @@ if "!VMWARE_FOUND!"=="YES" (
     call :Info "VMware vmrun not found — VMware detection skipped."
 )
 
+:: --- Hyper-V PowerShell module ---
+
+set "HYPERV_FOUND=NO"
+
+REM Hyper-V is managed via PowerShell; check if the role is installed
+REM via the presence of the vmms (Virtual Machine Management) service.
+sc query vmms >nul 2>&1
+if !errorlevel! equ 0 (
+    powershell -NoProfile -Command "Get-Module -ListAvailable Hyper-V" >nul 2>&1
+    if !errorlevel! equ 0 (
+        set "HYPERV_FOUND=YES"
+        call :OK "Hyper-V detected (role installed + PowerShell module available)."
+    ) else (
+        call :Info "Hyper-V service (vmms) running but PowerShell Hyper-V module not available."
+        call :Info "Hyper-V detection skipped."
+    )
+) else (
+    call :Info "Hyper-V role not installed — Hyper-V detection skipped."
+)
+
 REM --- Neither found? ---
 
-if "!VBOX_FOUND!"=="NO" if "!VMWARE_FOUND!"=="NO" (
-    call :Warn "Neither VirtualBox nor VMware tools were detected."
+if "!VBOX_FOUND!"=="NO" if "!VMWARE_FOUND!"=="NO" if "!HYPERV_FOUND!"=="NO" (
+    call :Warn "No supported hypervisors were detected."
+    call :Warn "Checked: Hyper-V, VirtualBox, VMware."
     call :Warn "No VM management is possible. Proceeding directly to host shutdown..."
     goto :PreShutdown
 )
@@ -259,6 +280,42 @@ if "!VBOX_FOUND!"=="YES" (
         )
     )
     del /f /q "!VBOX_TMP!" >nul 2>&1
+)
+
+:: --- Hyper-V: discover running VMs ---
+
+if "!HYPERV_FOUND!"=="YES" (
+    call :Info "Scanning for running Hyper-V VMs..."
+
+    REM Use PowerShell to enumerate running Hyper-V VMs.
+    REM Output: one VM name per line (no header, no decoration).
+    set "HYPERV_TMP=%TEMP%\~hyperv_list_!RANDOM!.tmp"
+    powershell -NoProfile -Command "Get-VM | Where-Object { $_.State -eq 'Running' } | ForEach-Object { Write-Output $_.VMName }" > "!HYPERV_TMP!" 2>&1
+
+    if !errorlevel! neq 0 (
+        call :Warn "PowerShell Get-VM returned an error while listing Hyper-V VMs."
+        call :Warn "Ensure Hyper-V Virtual Machine Management service is running."
+        type "!HYPERV_TMP!" >> "!LOG_FILE!"
+    ) else (
+        set "PARSE_COUNT=0"
+        for /f "usebackq tokens=*" %%L in ("!HYPERV_TMP!") do (
+            set "VM_NAME=%%L"
+            REM Skip empty lines and PowerShell error lines that may leak
+            if not "!VM_NAME!"=="" (
+                echo !VM_NAME! | findstr /v /i /c:"error" /c:"warning" /c:"exception" >nul 2>&1
+                if !errorlevel! equ 0 (
+                    echo HYPERV^|!VM_NAME!^|!VM_NAME!>> "!VM_LIST_FILE!"
+                    call :Info "  Found Hyper-V VM: !VM_NAME!"
+                    set /a VM_TOTAL+=1
+                    set /a PARSE_COUNT+=1
+                )
+            )
+        )
+        if !PARSE_COUNT! equ 0 (
+            call :Info "  No running Hyper-V VMs detected."
+        )
+    )
+    del /f /q "!HYPERV_TMP!" >nul 2>&1
 )
 
 :: --- VMware: discover running VMs ---
@@ -322,9 +379,9 @@ call :Log "===== VM SHUTDOWN PHASE ====="
 call :Log ""
 
 REM The inventory file has format: TYPE|NAME|ID
-REM   TYPE = VBOX or VMWARE
+REM   TYPE = VBOX or VMWARE or HYPERV
 REM   NAME = human-readable VM name
-REM   ID   = UUID (VBox) or full .vmx path (VMware)
+REM   ID   = UUID (VBox) or full .vmx path (VMware) or VM name (HyperV)
 for /f "usebackq tokens=1,2,3 delims=|" %%A in ("!VM_LIST_FILE!") do (
     set "VM_TYPE=%%A"
     set "VM_NAME=%%B"
@@ -337,6 +394,8 @@ for /f "usebackq tokens=1,2,3 delims=|" %%A in ("!VM_LIST_FILE!") do (
         call :ShutdownVBox "!VM_NAME!"
     ) else if "!VM_TYPE!"=="VMWARE" (
         call :ShutdownVMware "!VM_ID!" "!VM_NAME!"
+    ) else if "!VM_TYPE!"=="HYPERV" (
+        call :ShutdownHyperV "!VM_NAME!"
     ) else (
         call :Warn "  Unknown VM type '!VM_TYPE!' — skipping."
         set /a VM_SKIPPED+=1
@@ -359,6 +418,16 @@ if "!VBOX_FOUND!"=="YES" (
         if not "%%L"=="" set /a REMAINING+=1
     )
     del /f /q "!VBOX_VERIFY!" >nul 2>&1
+)
+
+if "!HYPERV_FOUND!"=="YES" (
+    set "HYPERV_VERIFY=%TEMP%\~hyperv_verify_!RANDOM!.tmp"
+    powershell -NoProfile -Command "(Get-VM | Where-Object { $_.State -eq 'Running' }).Count" > "!HYPERV_VERIFY!" 2>&1
+    set /p HYPERV_RUNNING=<"!HYPERV_VERIFY!"
+    REM Sanitise: if the output isn't purely numeric, treat as 0
+    echo !HYPERV_RUNNING! | findstr /r "^[0-9][0-9]*$" >nul 2>&1
+    if !errorlevel! equ 0 set /a REMAINING+=!HYPERV_RUNNING!
+    del /f /q "!HYPERV_VERIFY!" >nul 2>&1
 )
 
 if "!VMWARE_FOUND!"=="YES" (
@@ -515,6 +584,89 @@ exit /b 0
             exit /b
         )
     goto :_VBoxPollLoop
+exit /b
+
+
+:: ---------------------------------------------------------------------------
+:: ShutdownHyperV — Graceful shutdown of a Hyper-V guest VM
+::
+::   %1 = VM name
+::
+:: Process:
+::   1. Stop-VM with -TurnOff:$false (graceful guest OS shutdown via
+::      Hyper-V Integration Services)
+::   2. Poll Get-VM state every CFG_CHECK_INTERVAL seconds
+::   3. If VM state is Off → SUCCESS
+::   4. If CFG_SHUTDOWN_TIMEOUT exceeded → attempt -TurnOff:$true (hard stop)
+:: ---------------------------------------------------------------------------
+:ShutdownHyperV
+    set "HV_NAME=%~1"
+    set "HV_ELAPSED=0"
+
+    REM Pre-check: is the VM actually running?
+    set "HV_PRE_CHECK=%TEMP%\~hyperv_pre_!RANDOM!.tmp"
+    powershell -NoProfile -Command "if ((Get-VM -Name '%HV_NAME%').State -eq 'Running') { 'YES' } else { 'NO' }" > "!HV_PRE_CHECK!" 2>&1
+    set /p HV_PRE_STATE=<"!HV_PRE_CHECK!"
+    del /f /q "!HV_PRE_CHECK!" >nul 2>&1
+
+    if /i "!HV_PRE_STATE!"=="NO" (
+        call :OK "  Hyper-V VM '%HV_NAME%' is already powered off."
+        set /a VM_SUCCESS+=1
+        exit /b
+    )
+
+    REM Send graceful shutdown via Hyper-V Integration Services
+    powershell -NoProfile -Command "Stop-VM -Name '%HV_NAME%' -TurnOff:$false -Confirm:$false" >> "!LOG_FILE!" 2>&1
+
+    if !errorlevel! neq 0 (
+        call :Error "  FAILED to send graceful shutdown to Hyper-V VM '%HV_NAME%'."
+        call :Error "  Check that Hyper-V Integration Services are enabled in the guest."
+        set /a VM_FAILED+=1
+        exit /b
+    )
+
+    call :Info "  Graceful shutdown command sent via Integration Services. Polling..."
+
+    :_HyperVPollLoop
+        timeout /t %CFG_CHECK_INTERVAL% /nobreak >nul
+        set /a HV_ELAPSED+=%CFG_CHECK_INTERVAL%
+
+        set "HV_STATE_TMP=%TEMP%\~hyperv_state_!RANDOM!.tmp"
+        powershell -NoProfile -Command "(Get-VM -Name '%HV_NAME%').State" > "!HV_STATE_TMP!" 2>&1
+        set /p HV_STATE=<"!HV_STATE_TMP!"
+        del /f /q "!HV_STATE_TMP!" >nul 2>&1
+
+        if /i "!HV_STATE!"=="Off" (
+            call :OK "  Hyper-V VM '%HV_NAME%' powered off successfully. (!HV_ELAPSED!s)"
+            set /a VM_SUCCESS+=1
+            exit /b
+        )
+
+        call :Info "  Hyper-V VM '%HV_NAME%' state: !HV_STATE! ... (!HV_ELAPSED!s / %CFG_SHUTDOWN_TIMEOUT%s)"
+
+        REM Timeout check
+        if !HV_ELAPSED! geq %CFG_SHUTDOWN_TIMEOUT% (
+            call :Warn "  TIMEOUT reached (!HV_ELAPSED!s) for Hyper-V VM '%HV_NAME%'."
+
+            if /i "%CFG_FORCE_SHUTDOWN%"=="YES" (
+                call :Warn "  Force power-off ENABLED — sending hard stop..."
+                powershell -NoProfile -Command "Stop-VM -Name '%HV_NAME%' -TurnOff:$true -Confirm:$false" >> "!LOG_FILE!" 2>&1
+                if !errorlevel! equ 0 (
+                    call :OK "  Hyper-V VM '%HV_NAME%' forcefully powered off."
+                    set /a VM_FORCED+=1
+                    set /a VM_SUCCESS+=1
+                ) else (
+                    call :Error "  Force power-off FAILED for Hyper-V VM '%HV_NAME%'."
+                    set /a VM_FAILED+=1
+                )
+            ) else (
+                call :Warn "  Force shutdown is DISABLED in config."
+                call :Warn "  Hyper-V VM '%HV_NAME%' will be left running."
+                set /a VM_TIMEDOUT+=1
+            )
+            exit /b
+        )
+    goto :_HyperVPollLoop
 exit /b
 
 
