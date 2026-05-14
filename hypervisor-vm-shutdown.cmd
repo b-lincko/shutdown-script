@@ -6,7 +6,7 @@ setlocal enabledelayedexpansion
 ::  Compatibility:  Hyper-V + Oracle VirtualBox + VMware Workstation/Player
 ::  Purpose:        Gracefully shut down all running guest VMs, then the host
 ::  Usage:          Run as Administrator (auto-elevates if not elevated)
-::  Version:        3.1.0
+::  Version:        3.2.0
 ::  License:        MIT
 :: ============================================================================
 
@@ -92,36 +92,11 @@ call :Log "Log    : !LOG_FILE!"
 call :Log ""
 
 :: ---------------------------------------------------------------------------
-::  SECTION 1 -- Administrator Privilege Check & Auto-Elevation
+::  SECTION 1 -- Hypervisor Tool Discovery
 :: ---------------------------------------------------------------------------
 
-REM Preferred check: High Mandatory Level SID (S-1-16-12288)
-whoami /groups >nul 2>&1
-net session >nul 2>&1
-if !errorlevel! neq 0 (
-    call :Warn "Not running as Administrator -- attempting auto-elevation..."
-
-    REM Construct a temporary VBScript to relaunch elevated.
-    REM This is the ONLY reliable pure-CMD approach on all Windows versions.
-    set "VBS_FILE=%TEMP%\~hvs_elevate_!RANDOM!.vbs"
-    echo Set UAC = CreateObject^("Shell.Application"^) > "!VBS_FILE!"
-    echo UAC.ShellExecute "%~dpnx0", "", "%~dp0", "runas", 1 >> "!VBS_FILE!"
-    cscript //nologo "!VBS_FILE!" >nul 2>&1
-    del /f /q "!VBS_FILE!" >nul 2>&1
-
-    REM If we reach this point, the user cancelled UAC prompt or it failed
-    call :Error "Administrator privileges are REQUIRED. Cannot continue."
-    call :Log ""
-    pause
-    exit /b 1
-)
-
-call :OK "Confirmed: running with Administrator privileges."
-call :Log ""
-
-:: ---------------------------------------------------------------------------
-::  SECTION 2 -- Hypervisor Tool Discovery
-:: ---------------------------------------------------------------------------
+REM Note: No admin check needed. VirtualBox and VMware can shut down VMs
+REM without elevation. Hyper-V requires admin but is optional.
 
 call :Log "----- TOOL DISCOVERY -----"
 
@@ -242,8 +217,10 @@ REM --- Neither found? ---
 if "!VBOX_FOUND!"=="NO" if "!VMWARE_FOUND!"=="NO" if "!HYPERV_FOUND!"=="NO" (
     call :Warn "No supported hypervisors were detected."
     call :Warn "Checked: Hyper-V, VirtualBox, VMware."
-    call :Warn "No VM management is possible. Proceeding directly to host shutdown..."
-    goto :PreShutdown
+    call :Warn "Nothing to shut down. Exiting."
+    call :Log ""
+    call :SummaryReport
+    goto :EOF
 )
 
 call :Log ""
@@ -470,6 +447,19 @@ call :SummaryReport
 :PreShutdown
 
 call :Log "===== HOST SHUTDOWN ====="
+
+REM Check if we have admin rights for the host shutdown command
+net session >nul 2>&1
+if !errorlevel! neq 0 (
+    call :Warn "Not running as Administrator -- cannot shut down the host."
+    call :Warn "Run this script as Admin to enable host shutdown."
+    call :Warn "VMs have been processed. Exiting without shutting down the host."
+    call :Log ""
+    call :SummaryReport
+    goto :EOF
+)
+
+call :OK "Confirmed: Administrator privileges available for host shutdown."
 
 REM Copy countdown value before potential endlocal issues
 set "SHUTDOWN_DELAY=%CFG_HOST_SHUTDOWN_DELAY%"
