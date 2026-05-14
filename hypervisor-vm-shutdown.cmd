@@ -6,7 +6,7 @@ setlocal enabledelayedexpansion
 ::  Compatibility:  Hyper-V + Oracle VirtualBox + VMware Workstation/Player
 ::  Purpose:        Gracefully shut down all running guest VMs, then the host
 ::  Usage:          Run as Administrator (auto-elevates if not elevated)
-::  Version:        2.2.0
+::  Version:        2.2.1
 ::  License:        MIT
 :: ============================================================================
 
@@ -45,7 +45,10 @@ set "SCRIPT_DIR=%~dp0"
 
 REM Generate a locale-independent timestamp via PowerShell
 REM (wmic is deprecated and locale-sensitive; this is bulletproof)
-for /f "usebackq tokens=*" %%T in (`powershell -NoProfile -Command "Get-Date -Format 'yyyyMMdd_HHmmss'"`) do set "TIMESTAMP=%%T"
+powershell -NoProfile -Command "Get-Date -Format 'yyyyMMdd_HHmmss'" > "%TEMP%\hyperv_ts.tmp" 2>nul
+set "TIMESTAMP="
+for /f "usebackq tokens=*" %%T in ("%TEMP%\hyperv_ts.tmp") do set "TIMESTAMP=%%T"
+del /f /q "%TEMP%\hyperv_ts.tmp" >nul 2>&1
 if "!TIMESTAMP!"=="" (
     REM Last-resort fallback (may be locale-dependent)
     set "TIMESTAMP=%DATE:~-4%%DATE:~3,2%%DATE:~0,2%_%TIME:~0,2%%TIME:~3,2%%TIME:~6,2%"
