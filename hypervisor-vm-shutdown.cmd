@@ -6,7 +6,7 @@ setlocal enabledelayedexpansion
 ::  Compatibility:  Hyper-V + Oracle VirtualBox + VMware Workstation/Player
 ::  Purpose:        Gracefully shut down all running guest VMs, then the host
 ::  Usage:          Run as Administrator (auto-elevates if not elevated)
-::  Version:        3.0.0
+::  Version:        3.1.0
 ::  License:        MIT
 :: ============================================================================
 
@@ -56,20 +56,8 @@ if "!TIMESTAMP!"=="" (
 set "LOG_FILE=%CFG_LOG_DIR%\shutdown_!TIMESTAMP!.log"
 
 REM Obtain the ESC character (0x1B) for ANSI colour sequences
-REM Using certutil to decode a hex string is the safest method -- no for/f backticks
-set "ESC_HEXFILE=%TEMP%\~hvs_esc.hex"
-echo 1B> "%ESC_HEXFILE%"
-certutil -decodehex "%ESC_HEXFILE%" "%TEMP%\~hvs_esc.bin" >nul 2>&1
-del /f /q "%ESC_HEXFILE%" >nul 2>&1
-set "ESC="
-if exist "%TEMP%\~hvs_esc.bin" (
-    for /f "usebackq" %%E in ("%TEMP%\~hvs_esc.bin") do set "ESC=%%E"
-    del /f /q "%TEMP%\~hvs_esc.bin" >nul 2>&1
-)
-if "!ESC!"=="" (
-    REM Fallback: try the prompt method inside a subroutine (avoids backtick issues)
-    call :GetEscChar
-)
+REM prompt $E method -- proven safe, uses CMD internals only
+for /f %%E in ('"prompt $E$S & for %%X in (1) do echo off"') do set "ESC=%%E"
 if "!ESC!"=="" (
     echo [WARN] Could not obtain ESC character -- colours disabled.
     set "CFG_COLOR_OUTPUT=NO"
@@ -163,7 +151,7 @@ if "!VBOX_FOUND!"=="NO" (
     where VBoxManage.exe >nul 2>&1
     if !errorlevel! equ 0 (
         where VBoxManage.exe > "%TEMP%\~hvs_vbox.tmp" 2>nul
-        set /p VBOX_MANAGE=<"%TEMP%\~hvs_vbox.tmp"
+        for /f "usebackq tokens=*" %%P in ("%TEMP%\~hvs_vbox.tmp") do set "VBOX_MANAGE=%%P"
         del /f /q "%TEMP%\~hvs_vbox.tmp" >nul 2>&1
         if not "!VBOX_MANAGE!"=="" set "VBOX_FOUND=YES"
     )
@@ -217,7 +205,7 @@ if "!VMWARE_FOUND!"=="NO" (
     where vmrun.exe >nul 2>&1
     if !errorlevel! equ 0 (
         where vmrun.exe > "%TEMP%\~hvs_vmware.tmp" 2>nul
-        set /p VMWARE_RUN=<"%TEMP%\~hvs_vmware.tmp"
+        for /f "usebackq tokens=*" %%P in ("%TEMP%\~hvs_vmware.tmp") do set "VMWARE_RUN=%%P"
         del /f /q "%TEMP%\~hvs_vmware.tmp" >nul 2>&1
         if not "!VMWARE_RUN!"=="" set "VMWARE_FOUND=YES"
     )
@@ -916,22 +904,6 @@ exit /b
     ) else (
         echo [ WARN ] %~1
     )
-exit /b
-
-
-:: ---------------------------------------------------------------------------
-:: GetEscChar -- Fallback ESC character acquisition (safe, no backticks)
-:: ---------------------------------------------------------------------------
-:GetEscChar
-    REM Create a temporary script that sets ESC via prompt $E
-    set "ESC_SCRIPT=%TEMP%\~hvs_esc.cmd"
-    echo @echo off > "!ESC_SCRIPT!"
-    echo setlocal enabledelayedexpansion >> "!ESC_SCRIPT!"
-    echo for /f %%%%E in ^("prompt $E$S & for %%%%X in (1) do echo off"^) do set "ESC=%%%%E" >> "!ESC_SCRIPT!"
-    echo echo !ESC!^|findstr /r "^."^>nul ^&^& set "ESC=!ESC!" >> "!ESC_SCRIPT!"
-    echo endlocal >> "!ESC_SCRIPT!"
-    call "!ESC_SCRIPT!"
-    del /f /q "!ESC_SCRIPT!" >nul 2>&1
 exit /b
 
 
