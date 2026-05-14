@@ -208,18 +208,19 @@ if "!VMWARE_FOUND!"=="YES" (
 
 set "HYPERV_FOUND=NO"
 
-REM Hyper-V is managed via PowerShell; check if the role is installed
-REM via the presence of the vmms (Virtual Machine Management) service.
-sc query vmms >nul 2>&1
-if !errorlevel! equ 0 (
-    powershell -NoProfile -Command "Get-Module -ListAvailable Hyper-V" >nul 2>&1
-    if !errorlevel! equ 0 (
-        set "HYPERV_FOUND=YES"
-        call :OK "Hyper-V detected (role installed + PowerShell module available)."
-    ) else (
-        call :Info "Hyper-V service (vmms) running but PowerShell Hyper-V module not available."
-        call :Info "Hyper-V detection skipped."
-    )
+REM Detect Hyper-V via PowerShell using a single atomic call.
+REM Get-WindowsOptionalFeature works offline too (DISM); Get-VM requires the role.
+REM We check both: Hyper-V platform availability + the cmdlets.
+powershell -NoProfile -Command "if ((Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All).State -eq 'Enabled') { if (Get-Module -ListAvailable Hyper-V) { 'YES' } else { 'SVC' } } else { 'NO' }" > "%TEMP%\~hyperv_detect_!RANDOM!.tmp" 2>nul
+set /p HYPERV_DETECT=<"%TEMP%\~hyperv_detect_!RANDOM!.tmp"
+del /f /q "%TEMP%\~hyperv_detect_*" >nul 2>&1
+
+if /i "!HYPERV_DETECT!"=="YES" (
+    set "HYPERV_FOUND=YES"
+    call :OK "Hyper-V detected (role installed + PowerShell module available)."
+) else if /i "!HYPERV_DETECT!"=="SVC" (
+    call :Info "Hyper-V role installed but PowerShell Hyper-V module not available."
+    call :Info "Hyper-V detection skipped."
 ) else (
     call :Info "Hyper-V role not installed — Hyper-V detection skipped."
 )
