@@ -6,7 +6,7 @@ setlocal enabledelayedexpansion
 ::  Compatibility:  Hyper-V + Oracle VirtualBox + VMware Workstation/Player
 ::  Purpose:        Gracefully shut down all running guest VMs, then the host
 ::  Usage:          Run as Administrator (auto-elevates if not elevated)
-::  Version:        2.2.1
+::  Version:        3.0.0
 ::  License:        MIT
 :: ============================================================================
 
@@ -44,11 +44,10 @@ set "SCRIPT_NAME=%~nx0"
 set "SCRIPT_DIR=%~dp0"
 
 REM Generate a locale-independent timestamp via PowerShell
-REM (wmic is deprecated and locale-sensitive; this is bulletproof)
-powershell -NoProfile -Command "Get-Date -Format 'yyyyMMdd_HHmmss'" > "%TEMP%\hyperv_ts.tmp" 2>nul
+powershell -NoProfile -Command "Get-Date -Format 'yyyyMMdd_HHmmss'" > "%TEMP%\~hvs_ts.tmp" 2>nul
 set "TIMESTAMP="
-for /f "usebackq tokens=*" %%T in ("%TEMP%\hyperv_ts.tmp") do set "TIMESTAMP=%%T"
-del /f /q "%TEMP%\hyperv_ts.tmp" >nul 2>&1
+for /f "usebackq tokens=*" %%T in ("%TEMP%\~hvs_ts.tmp") do set "TIMESTAMP=%%T"
+del /f /q "%TEMP%\~hvs_ts.tmp" >nul 2>&1
 if "!TIMESTAMP!"=="" (
     REM Last-resort fallback (may be locale-dependent)
     set "TIMESTAMP=%DATE:~-4%%DATE:~3,2%%DATE:~0,2%_%TIME:~0,2%%TIME:~3,2%%TIME:~6,2%"
@@ -57,9 +56,20 @@ if "!TIMESTAMP!"=="" (
 set "LOG_FILE=%CFG_LOG_DIR%\shutdown_!TIMESTAMP!.log"
 
 REM Obtain the ESC character (0x1B) for ANSI colour sequences
-REM Method: spawn a child cmd, set its prompt to ESC+space, echo something so
-REM the prompt text is emitted, then capture the first token (the ESC byte).
-for /f %%E in ('"prompt $E$S & for %%X in (1) do echo off"') do set "ESC=%%E"
+REM Using certutil to decode a hex string is the safest method -- no for/f backticks
+set "ESC_HEXFILE=%TEMP%\~hvs_esc.hex"
+echo 1B> "%ESC_HEXFILE%"
+certutil -decodehex "%ESC_HEXFILE%" "%TEMP%\~hvs_esc.bin" >nul 2>&1
+del /f /q "%ESC_HEXFILE%" >nul 2>&1
+set "ESC="
+if exist "%TEMP%\~hvs_esc.bin" (
+    for /f "usebackq" %%E in ("%TEMP%\~hvs_esc.bin") do set "ESC=%%E"
+    del /f /q "%TEMP%\~hvs_esc.bin" >nul 2>&1
+)
+if "!ESC!"=="" (
+    REM Fallback: try the prompt method inside a subroutine (avoids backtick issues)
+    call :GetEscChar
+)
 if "!ESC!"=="" (
     echo [WARN] Could not obtain ESC character -- colours disabled.
     set "CFG_COLOR_OUTPUT=NO"
@@ -98,30 +108,24 @@ call :Log ""
 :: ---------------------------------------------------------------------------
 
 REM Preferred check: High Mandatory Level SID (S-1-16-12288)
-whoami /groups 2>nul | find "S-1-16-12288" >nul 2>&1
+whoami /groups >nul 2>&1
+net session >nul 2>&1
 if !errorlevel! neq 0 (
-    REM Fallback check for older systems: net session
-    net session >nul 2>&1
-    if !errorlevel! neq 0 (
-        call :Warn "Not running as Administrator -- attempting auto-elevation..."
+    call :Warn "Not running as Administrator -- attempting auto-elevation..."
 
-        REM Construct a temporary VBScript to relaunch elevated.
-        REM This is the ONLY reliable pure-CMD approach on all Windows versions.
-        set "VBS_FILE=%TEMP%\~elevate_!RANDOM!.vbs"
-        (
-            echo Set UAC = CreateObject^("Shell.Application"^)
-            echo UAC.ShellExecute "%~dpnx0", "", "%~dp0", "runas", 1
-        ) > "!VBS_FILE!"
+    REM Construct a temporary VBScript to relaunch elevated.
+    REM This is the ONLY reliable pure-CMD approach on all Windows versions.
+    set "VBS_FILE=%TEMP%\~hvs_elevate_!RANDOM!.vbs"
+    echo Set UAC = CreateObject^("Shell.Application"^) > "!VBS_FILE!"
+    echo UAC.ShellExecute "%~dpnx0", "", "%~dp0", "runas", 1 >> "!VBS_FILE!"
+    cscript //nologo "!VBS_FILE!" >nul 2>&1
+    del /f /q "!VBS_FILE!" >nul 2>&1
 
-        cscript //nologo "!VBS_FILE!" >nul 2>&1
-        del /f /q "!VBS_FILE!" >nul 2>&1
-
-        REM If we reach this point, the user cancelled UAC prompt or it failed
-        call :Error "Administrator privileges are REQUIRED. Cannot continue."
-        call :Log ""
-        pause
-        exit /b 1
-    )
+    REM If we reach this point, the user cancelled UAC prompt or it failed
+    call :Error "Administrator privileges are REQUIRED. Cannot continue."
+    call :Log ""
+    pause
+    exit /b 1
 )
 
 call :OK "Confirmed: running with Administrator privileges."
@@ -138,27 +142,30 @@ call :Log "----- TOOL DISCOVERY -----"
 set "VBOX_MANAGE="
 set "VBOX_FOUND=NO"
 
-REM Search common install directories
-for %%D in (
-    "C:\Program Files\Oracle\VirtualBox"
-    "C:\Program Files (x86)\Oracle\VirtualBox"
-    "%ProgramFiles%\Oracle\VirtualBox"
-    "%ProgramFiles(x86)%\Oracle\VirtualBox"
-) do (
-    if exist "%%~D\VBoxManage.exe" (
-        set "VBOX_MANAGE=%%~D\VBoxManage.exe"
-        set "VBOX_FOUND=YES"
-    )
+if exist "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" (
+    set "VBOX_MANAGE=C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
+    set "VBOX_FOUND=YES"
+)
+if "!VBOX_FOUND!"=="NO" if exist "C:\Program Files (x86)\Oracle\VirtualBox\VBoxManage.exe" (
+    set "VBOX_MANAGE=C:\Program Files (x86)\Oracle\VirtualBox\VBoxManage.exe"
+    set "VBOX_FOUND=YES"
+)
+if "!VBOX_FOUND!"=="NO" if exist "%ProgramFiles%\Oracle\VirtualBox\VBoxManage.exe" (
+    set "VBOX_MANAGE=%ProgramFiles%\Oracle\VirtualBox\VBoxManage.exe"
+    set "VBOX_FOUND=YES"
+)
+if "!VBOX_FOUND!"=="NO" if exist "%ProgramFiles(x86)%\Oracle\VirtualBox\VBoxManage.exe" (
+    set "VBOX_MANAGE=%ProgramFiles(x86)%\Oracle\VirtualBox\VBoxManage.exe"
+    set "VBOX_FOUND=YES"
 )
 
-REM Check PATH as a last resort
 if "!VBOX_FOUND!"=="NO" (
     where VBoxManage.exe >nul 2>&1
     if !errorlevel! equ 0 (
-        for /f "delims=" %%P in ('where VBoxManage.exe 2^>nul') do (
-            set "VBOX_MANAGE=%%P"
-            set "VBOX_FOUND=YES"
-        )
+        where VBoxManage.exe > "%TEMP%\~hvs_vbox.tmp" 2>nul
+        set /p VBOX_MANAGE=<"%TEMP%\~hvs_vbox.tmp"
+        del /f /q "%TEMP%\~hvs_vbox.tmp" >nul 2>&1
+        if not "!VBOX_MANAGE!"=="" set "VBOX_FOUND=YES"
     )
 )
 
@@ -173,31 +180,46 @@ if "!VBOX_FOUND!"=="YES" (
 set "VMWARE_RUN="
 set "VMWARE_FOUND=NO"
 
-REM Common install locations for Workstation and Player
-for %%D in (
-    "C:\Program Files (x86)\VMware\VMware Workstation"
-    "C:\Program Files (x86)\VMware\VMware Player"
-    "C:\Program Files\VMware\VMware Workstation"
-    "C:\Program Files\VMware\VMware Player"
-    "%ProgramFiles(x86)%\VMware\VMware Workstation"
-    "%ProgramFiles(x86)%\VMware\VMware Player"
-    "%ProgramFiles%\VMware\VMware Workstation"
-    "%ProgramFiles%\VMware\VMware Player"
-) do (
-    if exist "%%~D\vmrun.exe" (
-        set "VMWARE_RUN=%%~D\vmrun.exe"
-        set "VMWARE_FOUND=YES"
-    )
+if exist "C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe" (
+    set "VMWARE_RUN=C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe"
+    set "VMWARE_FOUND=YES"
+)
+if "!VMWARE_FOUND!"=="NO" if exist "C:\Program Files (x86)\VMware\VMware Player\vmrun.exe" (
+    set "VMWARE_RUN=C:\Program Files (x86)\VMware\VMware Player\vmrun.exe"
+    set "VMWARE_FOUND=YES"
+)
+if "!VMWARE_FOUND!"=="NO" if exist "C:\Program Files\VMware\VMware Workstation\vmrun.exe" (
+    set "VMWARE_RUN=C:\Program Files\VMware\VMware Workstation\vmrun.exe"
+    set "VMWARE_FOUND=YES"
+)
+if "!VMWARE_FOUND!"=="NO" if exist "C:\Program Files\VMware\VMware Player\vmrun.exe" (
+    set "VMWARE_RUN=C:\Program Files\VMware\VMware Player\vmrun.exe"
+    set "VMWARE_FOUND=YES"
+)
+if "!VMWARE_FOUND!"=="NO" if exist "%ProgramFiles%\VMware\VMware Workstation\vmrun.exe" (
+    set "VMWARE_RUN=%ProgramFiles%\VMware\VMware Workstation\vmrun.exe"
+    set "VMWARE_FOUND=YES"
+)
+if "!VMWARE_FOUND!"=="NO" if exist "%ProgramFiles%\VMware\VMware Player\vmrun.exe" (
+    set "VMWARE_RUN=%ProgramFiles%\VMware\VMware Player\vmrun.exe"
+    set "VMWARE_FOUND=YES"
+)
+if "!VMWARE_FOUND!"=="NO" if exist "%ProgramFiles(x86)%\VMware\VMware Workstation\vmrun.exe" (
+    set "VMWARE_RUN=%ProgramFiles(x86)%\VMware\VMware Workstation\vmrun.exe"
+    set "VMWARE_FOUND=YES"
+)
+if "!VMWARE_FOUND!"=="NO" if exist "%ProgramFiles(x86)%\VMware\VMware Player\vmrun.exe" (
+    set "VMWARE_RUN=%ProgramFiles(x86)%\VMware\VMware Player\vmrun.exe"
+    set "VMWARE_FOUND=YES"
 )
 
-REM Check PATH as fallback
 if "!VMWARE_FOUND!"=="NO" (
     where vmrun.exe >nul 2>&1
     if !errorlevel! equ 0 (
-        for /f "delims=" %%P in ('where vmrun.exe 2^>nul') do (
-            set "VMWARE_RUN=%%P"
-            set "VMWARE_FOUND=YES"
-        )
+        where vmrun.exe > "%TEMP%\~hvs_vmware.tmp" 2>nul
+        set /p VMWARE_RUN=<"%TEMP%\~hvs_vmware.tmp"
+        del /f /q "%TEMP%\~hvs_vmware.tmp" >nul 2>&1
+        if not "!VMWARE_RUN!"=="" set "VMWARE_FOUND=YES"
     )
 )
 
@@ -211,15 +233,11 @@ if "!VMWARE_FOUND!"=="YES" (
 
 set "HYPERV_FOUND=NO"
 
-REM Detect Hyper-V via PowerShell.
-REM Uses a fixed temp filename (no !RANDOM!) to avoid delayed-expansion bugs.
-REM try/catch handles systems where Get-WindowsOptionalFeature is unavailable.
-powershell -NoProfile -Command "try { $f = Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction Stop; if ($f.State -eq 'Enabled') { $m = Get-Module -ListAvailable Hyper-V -ErrorAction SilentlyContinue; if ($m) { 'YES' } else { 'SVC' } } else { 'NO' } } catch { 'NO' }" > "%TEMP%\hyperv_detect.tmp" 2>nul
-
-REM Read back the result using for /f (safer than set /p with redirects)
+REM Detect Hyper-V via PowerShell using a temp file (never for/f backticks)
+powershell -NoProfile -Command "try { $f = Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction Stop; if ($f.State -eq 'Enabled') { $m = Get-Module -ListAvailable Hyper-V -ErrorAction SilentlyContinue; if ($m) { 'YES' } else { 'SVC' } } else { 'NO' } } catch { 'NO' }" > "%TEMP%\~hvs_hyperv.tmp" 2>nul
 set "HYPERV_DETECT="
-for /f "usebackq tokens=*" %%R in ("%TEMP%\hyperv_detect.tmp") do set "HYPERV_DETECT=%%R"
-del /f /q "%TEMP%\hyperv_detect.tmp" >nul 2>&1
+for /f "usebackq tokens=*" %%R in ("%TEMP%\~hvs_hyperv.tmp") do set "HYPERV_DETECT=%%R"
+del /f /q "%TEMP%\~hvs_hyperv.tmp" >nul 2>&1
 
 if /i "!HYPERV_DETECT!"=="YES" (
     set "HYPERV_FOUND=YES"
@@ -248,7 +266,7 @@ call :Log ""
 
 call :Log "----- BUILDING VM INVENTORY -----"
 
-set "VM_LIST_FILE=%TEMP%\~vm_list_!RANDOM!.txt"
+set "VM_LIST_FILE=%TEMP%\~hvs_vm_list.tmp"
 type nul > "!VM_LIST_FILE!"
 
 :: --- VirtualBox: discover running VMs ---
@@ -256,17 +274,16 @@ type nul > "!VM_LIST_FILE!"
 if "!VBOX_FOUND!"=="YES" (
     call :Info "Scanning for running VirtualBox VMs..."
 
-    set "VBOX_TMP=%TEMP%\~vbox_running_!RANDOM!.tmp"
-    "!VBOX_MANAGE!" list runningvms > "!VBOX_TMP!" 2>&1
+    "!VBOX_MANAGE!" list runningvms > "%TEMP%\~hvs_vbox.tmp" 2>&1
 
     if !errorlevel! neq 0 (
         call :Warn "VBoxManage returned an error while listing running VMs."
         call :Warn "Ensure VirtualBox services are running."
-        type "!VBOX_TMP!" >> "!LOG_FILE!"
+        type "%TEMP%\~hvs_vbox.tmp" >> "!LOG_FILE!"
     ) else (
         REM Output format: "VM Name" {aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}
         REM We split on { } to get name and UUID separately
-        for /f "usebackq tokens=*" %%L in ("!VBOX_TMP!") do (
+        for /f "usebackq tokens=*" %%L in ("%TEMP%\~hvs_vbox.tmp") do (
             set "VM_LINE=%%L"
 
             REM Extract name: everything before first '{', strip quotes
@@ -286,7 +303,7 @@ if "!VBOX_FOUND!"=="YES" (
             )
         )
     )
-    del /f /q "!VBOX_TMP!" >nul 2>&1
+    del /f /q "%TEMP%\~hvs_vbox.tmp" >nul 2>&1
 )
 
 :: --- Hyper-V: discover running VMs ---
@@ -296,19 +313,19 @@ if "!HYPERV_FOUND!"=="YES" (
 
     REM Use PowerShell to enumerate running Hyper-V VMs.
     REM Output: one VM name per line (no header, no decoration).
-    powershell -NoProfile -Command "Get-VM | Where-Object { $_.State -eq 'Running' } | ForEach-Object { Write-Output $_.VMName }" > "%TEMP%\hyperv_list.tmp" 2>nul
+    powershell -NoProfile -Command "Get-VM | Where-Object { $_.State -eq 'Running' } | ForEach-Object { Write-Output $_.VMName }" > "%TEMP%\~hvs_hvlist.tmp" 2>nul
 
     if !errorlevel! neq 0 (
         call :Warn "PowerShell Get-VM returned an error while listing Hyper-V VMs."
         call :Warn "Ensure Hyper-V Virtual Machine Management service is running."
-        type "%TEMP%\hyperv_list.tmp" >> "!LOG_FILE!"
+        type "%TEMP%\~hvs_hvlist.tmp" >> "!LOG_FILE!"
     ) else (
         set "PARSE_COUNT=0"
-        for /f "usebackq tokens=*" %%L in ("%TEMP%\hyperv_list.tmp") do (
+        for /f "usebackq tokens=*" %%L in ("%TEMP%\~hvs_hvlist.tmp") do (
             set "VM_NAME=%%L"
             REM Skip empty lines and PowerShell error lines that may leak
             if not "!VM_NAME!"=="" (
-                echo !VM_NAME! | findstr /v /i /c:"error" /c:"warning" /c:"exception" >nul 2>&1
+                echo !VM_NAME!| findstr /v /i /c:"error" /c:"warning" /c:"exception" >nul 2>&1
                 if !errorlevel! equ 0 (
                     echo HYPERV^|!VM_NAME!^|!VM_NAME!>> "!VM_LIST_FILE!"
                     call :Info "  Found Hyper-V VM: !VM_NAME!"
@@ -321,7 +338,7 @@ if "!HYPERV_FOUND!"=="YES" (
             call :Info "  No running Hyper-V VMs detected."
         )
     )
-    del /f /q "%TEMP%\hyperv_list.tmp" >nul 2>&1
+    del /f /q "%TEMP%\~hvs_hvlist.tmp" >nul 2>&1
 )
 
 :: --- VMware: discover running VMs ---
@@ -329,13 +346,12 @@ if "!HYPERV_FOUND!"=="YES" (
 if "!VMWARE_FOUND!"=="YES" (
     call :Info "Scanning for running VMware VMs..."
 
-    set "VMWARE_TMP=%TEMP%\~vmware_list_!RANDOM!.tmp"
-    "!VMWARE_RUN!" list > "!VMWARE_TMP!" 2>&1
+    "!VMWARE_RUN!" list > "%TEMP%\~hvs_vmlist.tmp" 2>&1
 
     if !errorlevel! neq 0 (
         call :Warn "vmrun returned an error while listing running VMs."
         call :Warn "Ensure VMware services are running."
-        type "!VMWARE_TMP!" >> "!LOG_FILE!"
+        type "%TEMP%\~hvs_vmlist.tmp" >> "!LOG_FILE!"
     ) else (
         REM Output format:
         REM   Total running VMs: 2
@@ -344,11 +360,11 @@ if "!VMWARE_FOUND!"=="YES" (
         REM
         REM Strategy: skip lines starting with "Total", everything else is a .vmx path.
         set "PARSE_COUNT=0"
-        for /f "usebackq tokens=*" %%L in ("!VMWARE_TMP!") do (
+        for /f "usebackq tokens=*" %%L in ("%TEMP%\~hvs_vmlist.tmp") do (
             set "VM_LINE=%%L"
 
             REM Only process lines that contain a .vmx path (skip summary header)
-            echo !VM_LINE! | findstr /i /c:".vmx" >nul 2>&1
+            echo !VM_LINE!| findstr /i /c:".vmx" >nul 2>&1
             if !errorlevel! equ 0 (
                 set "VM_PATH=!VM_LINE!"
                 REM Extract VM name from the .vmx filename
@@ -364,7 +380,7 @@ if "!VMWARE_FOUND!"=="YES" (
             call :Info "  No running VMware VMs detected."
         )
     )
-    del /f /q "!VMWARE_TMP!" >nul 2>&1
+    del /f /q "%TEMP%\~hvs_vmlist.tmp" >nul 2>&1
 )
 
 call :Log "Total running VMs detected: !VM_TOTAL!"
@@ -421,32 +437,30 @@ call :Log "===== FINAL VERIFICATION ====="
 set "REMAINING=0"
 
 if "!VBOX_FOUND!"=="YES" (
-    set "VBOX_VERIFY=%TEMP%\~vbox_verify_!RANDOM!.tmp"
-    "!VBOX_MANAGE!" list runningvms > "!VBOX_VERIFY!" 2>&1
-    for /f "usebackq tokens=*" %%L in ("!VBOX_VERIFY!") do (
+    "!VBOX_MANAGE!" list runningvms > "%TEMP%\~hvs_vboxverify.tmp" 2>&1
+    for /f "usebackq tokens=*" %%L in ("%TEMP%\~hvs_vboxverify.tmp") do (
         if not "%%L"=="" set /a REMAINING+=1
     )
-    del /f /q "!VBOX_VERIFY!" >nul 2>&1
+    del /f /q "%TEMP%\~hvs_vboxverify.tmp" >nul 2>&1
 )
 
 if "!HYPERV_FOUND!"=="YES" (
-    powershell -NoProfile -Command "(Get-VM | Where-Object { $_.State -eq 'Running' }).Count" > "%TEMP%\hyperv_verify.tmp" 2>nul
+    powershell -NoProfile -Command "(Get-VM | Where-Object { $_.State -eq 'Running' }).Count" > "%TEMP%\~hvs_hvverify.tmp" 2>nul
     set "HYPERV_RUNNING="
-    for /f "usebackq tokens=*" %%R in ("%TEMP%\hyperv_verify.tmp") do set "HYPERV_RUNNING=%%R"
-    del /f /q "%TEMP%\hyperv_verify.tmp" >nul 2>&1
-    REM Sanitise: if the output isn't purely numeric, treat as 0
-    echo !HYPERV_RUNNING! | findstr /r "^[0-9][0-9]*$" >nul 2>&1
+    for /f "usebackq tokens=*" %%R in ("%TEMP%\~hvs_hvverify.tmp") do set "HYPERV_RUNNING=%%R"
+    del /f /q "%TEMP%\~hvs_hvverify.tmp" >nul 2>&1
+    REM Sanitise: if the output is not purely numeric, treat as 0
+    echo !HYPERV_RUNNING!| findstr /r "^[0-9][0-9]*$" >nul 2>&1
     if !errorlevel! equ 0 set /a REMAINING+=!HYPERV_RUNNING!
 )
 
 if "!VMWARE_FOUND!"=="YES" (
-    set "VMWARE_VERIFY=%TEMP%\~vmware_verify_!RANDOM!.tmp"
-    "!VMWARE_RUN!" list > "!VMWARE_VERIFY!" 2>&1
-    for /f "usebackq tokens=*" %%L in ("!VMWARE_VERIFY!") do (
-        echo %%L | findstr /i /c:".vmx" >nul 2>&1
+    "!VMWARE_RUN!" list > "%TEMP%\~hvs_vmwareverify.tmp" 2>&1
+    for /f "usebackq tokens=*" %%L in ("%TEMP%\~hvs_vmwareverify.tmp") do (
+        echo %%L| findstr /i /c:".vmx" >nul 2>&1
         if !errorlevel! equ 0 set /a REMAINING+=1
     )
-    del /f /q "!VMWARE_VERIFY!" >nul 2>&1
+    del /f /q "%TEMP%\~hvs_vmwareverify.tmp" >nul 2>&1
 )
 
 if !REMAINING! gtr 0 (
@@ -518,26 +532,41 @@ exit /b 0
 :: Process:
 ::   1. Send ACPI power button press (simulates user pressing power button)
 ::   2. Poll VBoxManage list runningvms every CFG_CHECK_INTERVAL seconds
-::   3. If VM disappears from the list → SUCCESS
-::   4. If CFG_SHUTDOWN_TIMEOUT exceeded → attempt force-off (if enabled)
+::   3. If VM disappears from the list -- SUCCESS
+::   4. If CFG_SHUTDOWN_TIMEOUT exceeded -- attempt VBoxManage controlvm poweroff
 :: ---------------------------------------------------------------------------
 :ShutdownVBox
     set "VB_NAME=%~1"
     set "VB_ELAPSED=0"
 
-    REM Send ACPI soft-off signal
+    REM Pre-check: is the VM actually running?
+    "!VBOX_MANAGE!" list runningvms > "%TEMP%\~hvs_vbox_pre.tmp" 2>nul
+    set "VB_STILL_RUN=NO"
+    for /f "usebackq tokens=*" %%S in ("%TEMP%\~hvs_vbox_pre.tmp") do (
+        echo %%S| findstr /c:"!VB_NAME!" >nul 2>&1
+        if !errorlevel! equ 0 set "VB_STILL_RUN=YES"
+    )
+    del /f /q "%TEMP%\~hvs_vbox_pre.tmp" >nul 2>&1
+
+    if "!VB_STILL_RUN!"=="NO" (
+        call :OK "  VM '!VB_NAME!' is already powered off."
+        set /a VM_SUCCESS+=1
+        exit /b
+    )
+
+    REM Send ACPI power button signal
     "!VBOX_MANAGE!" controlvm "!VB_NAME!" acpipowerbutton >> "!LOG_FILE!" 2>&1
 
     if !errorlevel! neq 0 (
         REM Check if the VM is already off (race condition with external shutdown)
-        set "VB_PRE_CHECK=%TEMP%\~vbox_pre_!RANDOM!.tmp"
-        "!VBOX_MANAGE!" list runningvms 2>nul | findstr /c:"!VB_NAME!" > "!VB_PRE_CHECK!" 2>&1
-        set "VB_STILL_RUN=NO"
-        for /f "usebackq tokens=*" %%S in ("!VB_PRE_CHECK!") do (
-            if not "%%S"=="" set "VB_STILL_RUN=YES"
+        "!VBOX_MANAGE!" list runningvms > "%TEMP%\~hvs_vbox_pre2.tmp" 2>nul
+        set "VB_STILL_RUN2=NO"
+        for /f "usebackq tokens=*" %%S in ("%TEMP%\~hvs_vbox_pre2.tmp") do (
+            echo %%S| findstr /c:"!VB_NAME!" >nul 2>&1
+            if !errorlevel! equ 0 set "VB_STILL_RUN2=YES"
         )
-        del /f /q "!VB_PRE_CHECK!" >nul 2>&1
-        if "!VB_STILL_RUN!"=="NO" (
+        del /f /q "%TEMP%\~hvs_vbox_pre2.tmp" >nul 2>&1
+        if "!VB_STILL_RUN2!"=="NO" (
             call :OK "  VM '!VB_NAME!' is already powered off (no action needed)."
             set /a VM_SUCCESS+=1
         ) else (
@@ -554,26 +583,27 @@ exit /b 0
         timeout /t %CFG_CHECK_INTERVAL% /nobreak >nul
         set /a VB_ELAPSED+=%CFG_CHECK_INTERVAL%
 
-        REM Check if the VM is still in the running list
-        set "VB_STILL_RUNNING=NO"
-        set "VB_STATE_TMP=%TEMP%\~vbox_state_!RANDOM!.tmp"
-        "!VBOX_MANAGE!" list runningvms 2>nul | findstr /c:"!VB_NAME!" > "!VB_STATE_TMP!" 2>&1
-        for /f "usebackq tokens=*" %%S in ("!VB_STATE_TMP!") do (
-            if not "%%S"=="" set "VB_STILL_RUNNING=YES"
+        REM Check if VM has disappeared from the running list
+        set "VB_STATE=RUNNING"
+        "!VBOX_MANAGE!" list runningvms > "%TEMP%\~hvs_vbox_state.tmp" 2>nul
+        set "VB_FOUND_STATE=NO"
+        for /f "usebackq tokens=*" %%S in ("%TEMP%\~hvs_vbox_state.tmp") do (
+            echo %%S| findstr /c:"!VB_NAME!" >nul 2>&1
+            if !errorlevel! equ 0 set "VB_FOUND_STATE=YES"
         )
-        del /f /q "!VB_STATE_TMP!" >nul 2>&1
+        del /f /q "%TEMP%\~hvs_vbox_state.tmp" >nul 2>&1
 
-        if "!VB_STILL_RUNNING!"=="NO" (
+        if "!VB_FOUND_STATE!"=="NO" (
             call :OK "  VM '!VB_NAME!' powered off successfully. (!VB_ELAPSED!s)"
             set /a VM_SUCCESS+=1
             exit /b
         )
 
-        call :Info "  VM '!VB_NAME!' still running ... (!VB_ELAPSED!s / %CFG_SHUTDOWN_TIMEOUT%s)"
+        call :Info "  VM '!VB_NAME!' still running... (!VB_ELAPSED!s / %CFG_SHUTDOWN_TIMEOUT%s)"
 
         REM Timeout check
         if !VB_ELAPSED! geq %CFG_SHUTDOWN_TIMEOUT% (
-            call :Warn "  TIMEOUT reached (!VB_ELAPSED!s) for VM '!VB_NAME!'."
+            call :Warn "  TIMEOUT reached (!VB_ELAPSED!s) for '!VB_NAME!'."
 
             if /i "%CFG_FORCE_SHUTDOWN%"=="YES" (
                 call :Warn "  Force power-off ENABLED -- sending poweroff command..."
@@ -583,7 +613,7 @@ exit /b 0
                     set /a VM_FORCED+=1
                     set /a VM_SUCCESS+=1
                 ) else (
-                    call :Error "  Force power-off FAILED for VM '!VB_NAME!'."
+                    call :Error "  Force power-off FAILED for '!VB_NAME!'."
                     set /a VM_FAILED+=1
                 )
             ) else (
@@ -606,18 +636,18 @@ exit /b
 ::   1. Stop-VM with -TurnOff:$false (graceful guest OS shutdown via
 ::      Hyper-V Integration Services)
 ::   2. Poll Get-VM state every CFG_CHECK_INTERVAL seconds
-::   3. If VM state is Off → SUCCESS
-::   4. If CFG_SHUTDOWN_TIMEOUT exceeded → attempt -TurnOff:$true (hard stop)
+::   3. If VM state is Off -- SUCCESS
+::   4. If CFG_SHUTDOWN_TIMEOUT exceeded -- attempt -TurnOff:$true (hard stop)
 :: ---------------------------------------------------------------------------
 :ShutdownHyperV
     set "HV_NAME=%~1"
     set "HV_ELAPSED=0"
 
     REM Pre-check: is the VM actually running?
-    powershell -NoProfile -Command "if ((Get-VM -Name '%HV_NAME%').State -eq 'Running') { 'YES' } else { 'NO' }" > "%TEMP%\hyperv_pre.tmp" 2>nul
+    powershell -NoProfile -Command "if ((Get-VM -Name '%HV_NAME%').State -eq 'Running') { 'YES' } else { 'NO' }" > "%TEMP%\~hvs_hv_pre.tmp" 2>nul
     set "HV_PRE_STATE="
-    for /f "usebackq tokens=*" %%R in ("%TEMP%\hyperv_pre.tmp") do set "HV_PRE_STATE=%%R"
-    del /f /q "%TEMP%\hyperv_pre.tmp" >nul 2>&1
+    for /f "usebackq tokens=*" %%R in ("%TEMP%\~hvs_hv_pre.tmp") do set "HV_PRE_STATE=%%R"
+    del /f /q "%TEMP%\~hvs_hv_pre.tmp" >nul 2>&1
 
     if /i "!HV_PRE_STATE!"=="NO" (
         call :OK "  Hyper-V VM '%HV_NAME%' is already powered off."
@@ -641,10 +671,10 @@ exit /b
         timeout /t %CFG_CHECK_INTERVAL% /nobreak >nul
         set /a HV_ELAPSED+=%CFG_CHECK_INTERVAL%
 
-        powershell -NoProfile -Command "(Get-VM -Name '%HV_NAME%').State" > "%TEMP%\hyperv_state.tmp" 2>nul
+        powershell -NoProfile -Command "(Get-VM -Name '%HV_NAME%').State" > "%TEMP%\~hvs_hv_state.tmp" 2>nul
         set "HV_STATE="
-        for /f "usebackq tokens=*" %%R in ("%TEMP%\hyperv_state.tmp") do set "HV_STATE=%%R"
-        del /f /q "%TEMP%\hyperv_state.tmp" >nul 2>&1
+        for /f "usebackq tokens=*" %%R in ("%TEMP%\~hvs_hv_state.tmp") do set "HV_STATE=%%R"
+        del /f /q "%TEMP%\~hvs_hv_state.tmp" >nul 2>&1
 
         if /i "!HV_STATE!"=="Off" (
             call :OK "  Hyper-V VM '%HV_NAME%' powered off successfully. (!HV_ELAPSED!s)"
@@ -689,8 +719,8 @@ exit /b
 :: Process:
 ::   1. vmrun stop with "soft" mode (graceful guest OS shutdown)
 ::   2. Poll vmrun list every CFG_CHECK_INTERVAL seconds
-::   3. If .vmx path disappears from list → SUCCESS
-::   4. If CFG_SHUTDOWN_TIMEOUT exceeded → attempt "hard" stop (if enabled)
+::   3. If .vmx path disappears from list -- SUCCESS
+::   4. If CFG_SHUTDOWN_TIMEOUT exceeded -- attempt "hard" stop (if enabled)
 :: ---------------------------------------------------------------------------
 :ShutdownVMware
     set "VR_VMX=%~1"
@@ -699,47 +729,69 @@ exit /b
 
     REM Determine VMware product type: workstation (ws) or player
     set "VR_TYPE=ws"
-    echo !VMWARE_RUN! | findstr /i /c:"VMware Player" >nul 2>&1
+    echo !VMWARE_RUN!| findstr /i /c:"Player" >nul 2>&1
     if !errorlevel! equ 0 set "VR_TYPE=player"
 
-    REM Send graceful shutdown via vmrun
+    REM Pre-check: is the VM actually running?
+    set "VR_STILL_RUN=NO"
+    "!VMWARE_RUN!" list > "%TEMP%\~hvs_vmware_pre.tmp" 2>nul
+    for /f "usebackq tokens=*" %%S in ("%TEMP%\~hvs_vmware_pre.tmp") do (
+        echo %%S| findstr /i /c:"!VR_VMX!" >nul 2>&1
+        if !errorlevel! equ 0 set "VR_STILL_RUN=YES"
+    )
+    del /f /q "%TEMP%\~hvs_vmware_pre.tmp" >nul 2>&1
+
+    if "!VR_STILL_RUN!"=="NO" (
+        call :OK "  VMware VM '!VR_NAME!' is already powered off."
+        set /a VM_SUCCESS+=1
+        exit /b
+    )
+
+    REM Send soft stop signal (graceful guest OS shutdown)
     "!VMWARE_RUN!" -T !VR_TYPE! stop "!VR_VMX!" soft >> "!LOG_FILE!" 2>&1
 
     if !errorlevel! neq 0 (
-        REM Check if the VMX path still exists -- maybe the VM was already shut down
-        if not exist "!VR_VMX!" (
-            call :OK "  VMware VM '!VR_NAME!' appears to already be shut down (VMX not accessible)."
+        REM Check if the VM was already shut down (race condition)
+        set "VR_STILL_RUN2=NO"
+        "!VMWARE_RUN!" list > "%TEMP%\~hvs_vmware_pre2.tmp" 2>nul
+        for /f "usebackq tokens=*" %%S in ("%TEMP%\~hvs_vmware_pre2.tmp") do (
+            echo %%S| findstr /i /c:"!VR_VMX!" >nul 2>&1
+            if !errorlevel! equ 0 set "VR_STILL_RUN2=YES"
+        )
+        del /f /q "%TEMP%\~hvs_vmware_pre2.tmp" >nul 2>&1
+        if "!VR_STILL_RUN2!"=="NO" (
+            call :OK "  VMware VM '!VR_NAME!' is already powered off."
             set /a VM_SUCCESS+=1
         ) else (
-            call :Error "  FAILED to send graceful shutdown to VMware VM '!VR_NAME!'."
-            call :Error "  VMX: !VR_VMX!"
-            call :Error "  Check VMware services."
+            call :Error "  FAILED to send soft stop to VMware VM '!VR_NAME!'."
+            call :Error "  Check VMX path and VMware service state."
             set /a VM_FAILED+=1
         )
         exit /b
     )
 
-    call :Info "  Graceful shutdown command sent. Polling for power-off..."
+    call :Info "  Soft stop command sent. Polling for power-off..."
 
     :_VMwarePollLoop
         timeout /t %CFG_CHECK_INTERVAL% /nobreak >nul
         set /a VR_ELAPSED+=%CFG_CHECK_INTERVAL%
 
-        REM Check if the VMX path still appears in the running list
-        set "VR_STILL_RUNNING=NO"
-        set "VR_STATE_TMP=%TEMP%\~vmware_state_!RANDOM!.tmp"
-        "!VMWARE_RUN!" -T !VR_TYPE! list > "!VR_STATE_TMP!" 2>&1
-        findstr /c:"!VR_VMX!" "!VR_STATE_TMP!" >nul 2>&1
-        if !errorlevel! equ 0 set "VR_STILL_RUNNING=YES"
-        del /f /q "!VR_STATE_TMP!" >nul 2>&1
+        REM Check if VMX path still appears in running VMs list
+        set "VR_FOUND_STATE=NO"
+        "!VMWARE_RUN!" list > "%TEMP%\~hvs_vmware_state.tmp" 2>nul
+        for /f "usebackq tokens=*" %%S in ("%TEMP%\~hvs_vmware_state.tmp") do (
+            echo %%S| findstr /i /c:"!VR_VMX!" >nul 2>&1
+            if !errorlevel! equ 0 set "VR_FOUND_STATE=YES"
+        )
+        del /f /q "%TEMP%\~hvs_vmware_state.tmp" >nul 2>&1
 
-        if "!VR_STILL_RUNNING!"=="NO" (
+        if "!VR_FOUND_STATE!"=="NO" (
             call :OK "  VMware VM '!VR_NAME!' powered off successfully. (!VR_ELAPSED!s)"
             set /a VM_SUCCESS+=1
             exit /b
         )
 
-        call :Info "  VMware VM '!VR_NAME!' still running ... (!VR_ELAPSED!s / %CFG_SHUTDOWN_TIMEOUT%s)"
+        call :Info "  VM '!VR_NAME!' still running... (!VR_ELAPSED!s / %CFG_SHUTDOWN_TIMEOUT%s)"
 
         REM Timeout check
         if !VR_ELAPSED! geq %CFG_SHUTDOWN_TIMEOUT% (
@@ -765,11 +817,6 @@ exit /b
         )
     goto :_VMwarePollLoop
 exit /b
-
-
-:: ############################################################################
-::  REPORTING & LOGGING FUNCTIONS
-:: ############################################################################
 
 
 :: ---------------------------------------------------------------------------
@@ -869,6 +916,22 @@ exit /b
     ) else (
         echo [ WARN ] %~1
     )
+exit /b
+
+
+:: ---------------------------------------------------------------------------
+:: GetEscChar -- Fallback ESC character acquisition (safe, no backticks)
+:: ---------------------------------------------------------------------------
+:GetEscChar
+    REM Create a temporary script that sets ESC via prompt $E
+    set "ESC_SCRIPT=%TEMP%\~hvs_esc.cmd"
+    echo @echo off > "!ESC_SCRIPT!"
+    echo setlocal enabledelayedexpansion >> "!ESC_SCRIPT!"
+    echo for /f %%%%E in ^("prompt $E$S & for %%%%X in (1) do echo off"^) do set "ESC=%%%%E" >> "!ESC_SCRIPT!"
+    echo echo !ESC!^|findstr /r "^."^>nul ^&^& set "ESC=!ESC!" >> "!ESC_SCRIPT!"
+    echo endlocal >> "!ESC_SCRIPT!"
+    call "!ESC_SCRIPT!"
+    del /f /q "!ESC_SCRIPT!" >nul 2>&1
 exit /b
 
 
