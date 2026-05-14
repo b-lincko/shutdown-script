@@ -6,12 +6,12 @@ setlocal enabledelayedexpansion
 ::  Compatibility:  Hyper-V + Oracle VirtualBox + VMware Workstation/Player
 ::  Purpose:        Gracefully shut down all running guest VMs, then the host
 ::  Usage:          Run as Administrator (auto-elevates if not elevated)
-::  Version:        2.1.2
+::  Version:        2.2.0
 ::  License:        MIT
 :: ============================================================================
 
 :: ---------------------------------------------------------------------------
-:: CONFIGURATION — Adjust these to match your environment
+:: CONFIGURATION -- Adjust these to match your environment
 :: ---------------------------------------------------------------------------
 
     set "CFG_SHUTDOWN_TIMEOUT=300"
@@ -37,20 +37,20 @@ setlocal enabledelayedexpansion
     :: YES = ANSI-coloured console text   NO = plain white
 
 :: ---------------------------------------------------------------------------
-:: INTERNAL SETUP — Do not edit below unless you understand the consequences
+:: INTERNAL SETUP -- Do not edit below unless you understand the consequences
 :: ---------------------------------------------------------------------------
 
 set "SCRIPT_NAME=%~nx0"
 set "SCRIPT_DIR=%~dp0"
 
-REM Generate a robust, locale-independent timestamp via wmic
-for /f "tokens=2 delims==" %%I in ('wmic os get localdatetime /value 2^>nul') do set "DT=%%I"
-if "!DT!"=="" (
-    REM Fallback if wmic is unavailable (extremely rare on Server 2022)
-    set "DT=%DATE:~-4%%DATE:~3,2%%DATE:~0,2%%TIME:~0,2%%TIME:~3,2%%TIME:~6,2%"
-    set "DT=!DT: =0!"
+REM Generate a locale-independent timestamp via PowerShell
+REM (wmic is deprecated and locale-sensitive; this is bulletproof)
+for /f "usebackq tokens=*" %%T in (`powershell -NoProfile -Command "Get-Date -Format 'yyyyMMdd_HHmmss'"`) do set "TIMESTAMP=%%T"
+if "!TIMESTAMP!"=="" (
+    REM Last-resort fallback (may be locale-dependent)
+    set "TIMESTAMP=%DATE:~-4%%DATE:~3,2%%DATE:~0,2%_%TIME:~0,2%%TIME:~3,2%%TIME:~6,2%"
+    set "TIMESTAMP=!TIMESTAMP: =0!"
 )
-set "TIMESTAMP=!DT:~0,4!-!DT:~4,2!-!DT:~6,2!_!DT:~8,2!-!DT:~10,2!-!DT:~12,2!"
 set "LOG_FILE=%CFG_LOG_DIR%\shutdown_!TIMESTAMP!.log"
 
 REM Obtain the ESC character (0x1B) for ANSI colour sequences
@@ -58,7 +58,7 @@ REM Method: spawn a child cmd, set its prompt to ESC+space, echo something so
 REM the prompt text is emitted, then capture the first token (the ESC byte).
 for /f %%E in ('"prompt $E$S & for %%X in (1) do echo off"') do set "ESC=%%E"
 if "!ESC!"=="" (
-    echo [WARN] Could not obtain ESC character — colours disabled.
+    echo [WARN] Could not obtain ESC character -- colours disabled.
     set "CFG_COLOR_OUTPUT=NO"
 )
 
@@ -91,7 +91,7 @@ call :Log "Log    : !LOG_FILE!"
 call :Log ""
 
 :: ---------------------------------------------------------------------------
-::  SECTION 1 — Administrator Privilege Check & Auto-Elevation
+::  SECTION 1 -- Administrator Privilege Check & Auto-Elevation
 :: ---------------------------------------------------------------------------
 
 REM Preferred check: High Mandatory Level SID (S-1-16-12288)
@@ -100,7 +100,7 @@ if !errorlevel! neq 0 (
     REM Fallback check for older systems: net session
     net session >nul 2>&1
     if !errorlevel! neq 0 (
-        call :Warn "Not running as Administrator — attempting auto-elevation..."
+        call :Warn "Not running as Administrator -- attempting auto-elevation..."
 
         REM Construct a temporary VBScript to relaunch elevated.
         REM This is the ONLY reliable pure-CMD approach on all Windows versions.
@@ -125,7 +125,7 @@ call :OK "Confirmed: running with Administrator privileges."
 call :Log ""
 
 :: ---------------------------------------------------------------------------
-::  SECTION 2 — Hypervisor Tool Discovery
+::  SECTION 2 -- Hypervisor Tool Discovery
 :: ---------------------------------------------------------------------------
 
 call :Log "----- TOOL DISCOVERY -----"
@@ -162,7 +162,7 @@ if "!VBOX_FOUND!"=="NO" (
 if "!VBOX_FOUND!"=="YES" (
     call :OK "VirtualBox VBoxManage found: !VBOX_MANAGE!"
 ) else (
-    call :Info "VirtualBox VBoxManage not found — VirtualBox detection skipped."
+    call :Info "VirtualBox VBoxManage not found -- VirtualBox detection skipped."
 )
 
 :: --- VMware vmrun ---
@@ -201,7 +201,7 @@ if "!VMWARE_FOUND!"=="NO" (
 if "!VMWARE_FOUND!"=="YES" (
     call :OK "VMware vmrun found: !VMWARE_RUN!"
 ) else (
-    call :Info "VMware vmrun not found — VMware detection skipped."
+    call :Info "VMware vmrun not found -- VMware detection skipped."
 )
 
 :: --- Hyper-V PowerShell module ---
@@ -225,7 +225,7 @@ if /i "!HYPERV_DETECT!"=="YES" (
     call :Info "Hyper-V role installed but PowerShell Hyper-V module not available."
     call :Info "Hyper-V detection skipped."
 ) else (
-    call :Info "Hyper-V role not installed — Hyper-V detection skipped."
+    call :Info "Hyper-V role not installed -- Hyper-V detection skipped."
 )
 
 REM --- Neither found? ---
@@ -240,7 +240,7 @@ if "!VBOX_FOUND!"=="NO" if "!VMWARE_FOUND!"=="NO" if "!HYPERV_FOUND!"=="NO" (
 call :Log ""
 
 :: ---------------------------------------------------------------------------
-::  SECTION 3 — Build VM Inventory
+::  SECTION 3 -- Build VM Inventory
 :: ---------------------------------------------------------------------------
 
 call :Log "----- BUILDING VM INVENTORY -----"
@@ -268,7 +268,7 @@ if "!VBOX_FOUND!"=="YES" (
 
             REM Extract name: everything before first '{', strip quotes
             for /f "delims={" %%N in ("!VM_LINE!") do set "VM_NAME=%%~N"
-            REM VBoxManage output always has a space between name and { — trim last char
+            REM VBoxManage output always has a space between name and { -- trim last char
             if not "!VM_NAME!"=="" if "!VM_NAME:~-1!"==" " set "VM_NAME=!VM_NAME:~0,-1!"
             REM Also trim any remaining leading/trailing spaces (for edge cases)
             for /f "tokens=*" %%T in ("!VM_NAME!") do set "VM_NAME=%%T"
@@ -375,7 +375,7 @@ if !VM_TOTAL! equ 0 (
 )
 
 :: ---------------------------------------------------------------------------
-::  SECTION 4 — Shut Down Each VM
+::  SECTION 4 -- Shut Down Each VM
 :: ---------------------------------------------------------------------------
 
 call :Log "===== VM SHUTDOWN PHASE ====="
@@ -390,24 +390,27 @@ for /f "usebackq tokens=1,2,3 delims=|" %%A in ("!VM_LIST_FILE!") do (
     set "VM_NAME=%%B"
     set "VM_ID=%%C"
 
-    call :Log "--- Processing: !VM_NAME!  [!VM_TYPE!] ---"
-    call :Info "  Sending graceful shutdown command..."
+    REM Skip blank or malformed lines
+    if not "!VM_TYPE!"=="" (
+        call :Log "--- Processing: !VM_NAME!  [!VM_TYPE!] ---"
+        call :Info "  Sending graceful shutdown command..."
 
-    if "!VM_TYPE!"=="VBOX" (
-        call :ShutdownVBox "!VM_NAME!"
-    ) else if "!VM_TYPE!"=="VMWARE" (
-        call :ShutdownVMware "!VM_ID!" "!VM_NAME!"
-    ) else if "!VM_TYPE!"=="HYPERV" (
-        call :ShutdownHyperV "!VM_NAME!"
-    ) else (
-        call :Warn "  Unknown VM type '!VM_TYPE!' — skipping."
-        set /a VM_SKIPPED+=1
+        if "!VM_TYPE!"=="VBOX" (
+            call :ShutdownVBox "!VM_NAME!"
+        ) else if "!VM_TYPE!"=="VMWARE" (
+            call :ShutdownVMware "!VM_ID!" "!VM_NAME!"
+        ) else if "!VM_TYPE!"=="HYPERV" (
+            call :ShutdownHyperV "!VM_NAME!"
+        ) else (
+            call :Warn "  Unknown VM type '!VM_TYPE!' -- skipping."
+            set /a VM_SKIPPED+=1
+        )
+        call :Log ""
     )
-    call :Log ""
 )
 
 :: ---------------------------------------------------------------------------
-::  SECTION 5 — Final Verification
+::  SECTION 5 -- Final Verification
 :: ---------------------------------------------------------------------------
 
 call :Log "===== FINAL VERIFICATION ====="
@@ -450,26 +453,27 @@ if !REMAINING! gtr 0 (
 )
 
 :: ---------------------------------------------------------------------------
-::  SECTION 6 — Summary Report
+::  SECTION 6 -- Summary Report
 :: ---------------------------------------------------------------------------
 
 call :SummaryReport
 
 :: ---------------------------------------------------------------------------
-::  SECTION 7 — Host Shutdown
+::  SECTION 7 -- Host Shutdown
 :: ---------------------------------------------------------------------------
 
 :PreShutdown
 
 call :Log "===== HOST SHUTDOWN ====="
 
-set /a SHUTDOWN_DELAY=%CFG_HOST_SHUTDOWN_DELAY%
+REM Copy countdown value before potential endlocal issues
+set "SHUTDOWN_DELAY=%CFG_HOST_SHUTDOWN_DELAY%"
 
-call :Log "Host shutdown will begin in !SHUTDOWN_DELAY! seconds..."
+call :Log "Host shutdown will begin in %SHUTDOWN_DELAY% seconds..."
 call :Log "Press Ctrl+C now to abort."
 call :Log ""
 
-for /l %%I in (!SHUTDOWN_DELAY!,-1,1) do (
+for /l %%I in (%SHUTDOWN_DELAY%,-1,1) do (
     call :WarnNoLog "  Shutting down host in %%I second(s) ..."
     timeout /t 1 /nobreak >nul
 )
@@ -484,7 +488,7 @@ REM   /t N  = delay N seconds before shutdown
 REM   /f    = force running applications to close (they get a chance to save)
 REM   /d p:0:0 = planned shutdown, reason: other
 REM   /c    = comment shown to interactive users
-shutdown /s /t !SHUTDOWN_DELAY! /f /d p:0:0 /c "Hypervisor VM Shutdown Script — all VMs processed."
+shutdown /s /t %SHUTDOWN_DELAY% /f /d p:0:0 /c "Hypervisor VM Shutdown Script -- all VMs processed."
 
 call :Info "Host shutdown command issued successfully."
 call :Log ""
@@ -504,9 +508,9 @@ exit /b 0
 
 
 :: ---------------------------------------------------------------------------
-:: ShutdownVBox — Graceful ACPI shutdown of a VirtualBox guest VM
+:: ShutdownVBox -- Graceful ACPI shutdown of a VirtualBox guest VM
 ::
-::   %1 = VM name (or UUID — VBoxManage accepts either)
+::   %1 = VM name (or UUID -- VBoxManage accepts either)
 ::
 :: Process:
 ::   1. Send ACPI power button press (simulates user pressing power button)
@@ -569,7 +573,7 @@ exit /b 0
             call :Warn "  TIMEOUT reached (!VB_ELAPSED!s) for VM '!VB_NAME!'."
 
             if /i "%CFG_FORCE_SHUTDOWN%"=="YES" (
-                call :Warn "  Force power-off ENABLED — sending poweroff command..."
+                call :Warn "  Force power-off ENABLED -- sending poweroff command..."
                 "!VBOX_MANAGE!" controlvm "!VB_NAME!" poweroff >> "!LOG_FILE!" 2>&1
                 if !errorlevel! equ 0 (
                     call :OK "  VM '!VB_NAME!' forcefully powered off."
@@ -591,7 +595,7 @@ exit /b
 
 
 :: ---------------------------------------------------------------------------
-:: ShutdownHyperV — Graceful shutdown of a Hyper-V guest VM
+:: ShutdownHyperV -- Graceful shutdown of a Hyper-V guest VM
 ::
 ::   %1 = VM name
 ::
@@ -652,7 +656,7 @@ exit /b
             call :Warn "  TIMEOUT reached (!HV_ELAPSED!s) for Hyper-V VM '%HV_NAME%'."
 
             if /i "%CFG_FORCE_SHUTDOWN%"=="YES" (
-                call :Warn "  Force power-off ENABLED — sending hard stop..."
+                call :Warn "  Force power-off ENABLED -- sending hard stop..."
                 powershell -NoProfile -Command "Stop-VM -Name '%HV_NAME%' -TurnOff:$true -Confirm:$false" >> "!LOG_FILE!" 2>&1
                 if !errorlevel! equ 0 (
                     call :OK "  Hyper-V VM '%HV_NAME%' forcefully powered off."
@@ -674,7 +678,7 @@ exit /b
 
 
 :: ---------------------------------------------------------------------------
-:: ShutdownVMware — Graceful shutdown of a VMware guest VM via vmrun
+:: ShutdownVMware -- Graceful shutdown of a VMware guest VM via vmrun
 ::
 ::   %1 = Full path to .vmx file
 ::   %2 = VM name (for logging)
@@ -699,7 +703,7 @@ exit /b
     "!VMWARE_RUN!" -T !VR_TYPE! stop "!VR_VMX!" soft >> "!LOG_FILE!" 2>&1
 
     if !errorlevel! neq 0 (
-        REM Check if the VMX path still exists — maybe the VM was already shut down
+        REM Check if the VMX path still exists -- maybe the VM was already shut down
         if not exist "!VR_VMX!" (
             call :OK "  VMware VM '!VR_NAME!' appears to already be shut down (VMX not accessible)."
             set /a VM_SUCCESS+=1
@@ -739,7 +743,7 @@ exit /b
             call :Warn "  TIMEOUT reached (!VR_ELAPSED!s) for VMware VM '!VR_NAME!'."
 
             if /i "%CFG_FORCE_SHUTDOWN%"=="YES" (
-                call :Warn "  Force power-off ENABLED — sending hard stop..."
+                call :Warn "  Force power-off ENABLED -- sending hard stop..."
                 "!VMWARE_RUN!" -T !VR_TYPE! stop "!VR_VMX!" hard >> "!LOG_FILE!" 2>&1
                 if !errorlevel! equ 0 (
                     call :OK "  VMware VM '!VR_NAME!' forcefully powered off."
@@ -766,7 +770,7 @@ exit /b
 
 
 :: ---------------------------------------------------------------------------
-:: SummaryReport — Display and log a final shutdown summary
+:: SummaryReport -- Display and log a final shutdown summary
 :: ---------------------------------------------------------------------------
 :SummaryReport
     call :Log ""
@@ -793,7 +797,7 @@ exit /b
 
 
 :: ---------------------------------------------------------------------------
-:: Log  — Plain white text, goes to both console and log file
+:: Log  -- Plain white text, goes to both console and log file
 :: ---------------------------------------------------------------------------
 :Log
     if /i "%CFG_COLOR_OUTPUT%"=="YES" (
@@ -805,7 +809,7 @@ exit /b
 exit /b
 
 :: ---------------------------------------------------------------------------
-:: OK   — Green success message
+:: OK   -- Green success message
 :: ---------------------------------------------------------------------------
 :OK
     if /i "%CFG_COLOR_OUTPUT%"=="YES" (
@@ -817,7 +821,7 @@ exit /b
 exit /b
 
 :: ---------------------------------------------------------------------------
-:: Warn — Yellow warning message
+:: Warn -- Yellow warning message
 :: ---------------------------------------------------------------------------
 :Warn
     if /i "%CFG_COLOR_OUTPUT%"=="YES" (
@@ -829,7 +833,7 @@ exit /b
 exit /b
 
 :: ---------------------------------------------------------------------------
-:: Error — Red error message
+:: Error -- Red error message
 :: ---------------------------------------------------------------------------
 :Error
     if /i "%CFG_COLOR_OUTPUT%"=="YES" (
@@ -841,7 +845,7 @@ exit /b
 exit /b
 
 :: ---------------------------------------------------------------------------
-:: Info  — Cyan informational message
+:: Info  -- Cyan informational message
 :: ---------------------------------------------------------------------------
 :Info
     if /i "%CFG_COLOR_OUTPUT%"=="YES" (
@@ -853,7 +857,7 @@ exit /b
 exit /b
 
 :: ---------------------------------------------------------------------------
-:: WarnNoLog — Yellow warning to console ONLY (no log entry)
+:: WarnNoLog -- Yellow warning to console ONLY (no log entry)
 ::              Used for countdown timers and transient UI
 :: ---------------------------------------------------------------------------
 :WarnNoLog
@@ -866,7 +870,7 @@ exit /b
 
 
 :: ---------------------------------------------------------------------------
-:: Init — One-time setup: log directory, cleanup, terminal config
+:: Init -- One-time setup: log directory, cleanup, terminal config
 :: ---------------------------------------------------------------------------
 :Init
     REM Create log directory
