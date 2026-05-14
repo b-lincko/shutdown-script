@@ -6,7 +6,7 @@ setlocal enabledelayedexpansion
 ::  Compatibility:  Hyper-V + Oracle VirtualBox + VMware Workstation/Player
 ::  Purpose:        Gracefully shut down all running guest VMs, then the host
 ::  Usage:          Run as Administrator (auto-elevates if not elevated)
-::  Version:        2.1.0
+::  Version:        2.1.2
 ::  License:        MIT
 :: ============================================================================
 
@@ -208,12 +208,15 @@ if "!VMWARE_FOUND!"=="YES" (
 
 set "HYPERV_FOUND=NO"
 
-REM Detect Hyper-V via PowerShell using a single atomic call.
-REM Get-WindowsOptionalFeature works offline too (DISM); Get-VM requires the role.
-REM We check both: Hyper-V platform availability + the cmdlets.
-powershell -NoProfile -Command "if ((Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All).State -eq 'Enabled') { if (Get-Module -ListAvailable Hyper-V) { 'YES' } else { 'SVC' } } else { 'NO' }" > "%TEMP%\~hyperv_detect_!RANDOM!.tmp" 2>nul
-set /p HYPERV_DETECT=<"%TEMP%\~hyperv_detect_!RANDOM!.tmp"
-del /f /q "%TEMP%\~hyperv_detect_*" >nul 2>&1
+REM Detect Hyper-V via PowerShell.
+REM Uses a fixed temp filename (no !RANDOM!) to avoid delayed-expansion bugs.
+REM try/catch handles systems where Get-WindowsOptionalFeature is unavailable.
+powershell -NoProfile -Command "try { $f = Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction Stop; if ($f.State -eq 'Enabled') { $m = Get-Module -ListAvailable Hyper-V -ErrorAction SilentlyContinue; if ($m) { 'YES' } else { 'SVC' } } else { 'NO' } } catch { 'NO' }" > "%TEMP%\hyperv_detect.tmp" 2>nul
+
+REM Read back the result using for /f (safer than set /p with redirects)
+set "HYPERV_DETECT="
+for /f "usebackq tokens=*" %%R in ("%TEMP%\hyperv_detect.tmp") do set "HYPERV_DETECT=%%R"
+del /f /q "%TEMP%\hyperv_detect.tmp" >nul 2>&1
 
 if /i "!HYPERV_DETECT!"=="YES" (
     set "HYPERV_FOUND=YES"
@@ -290,16 +293,15 @@ if "!HYPERV_FOUND!"=="YES" (
 
     REM Use PowerShell to enumerate running Hyper-V VMs.
     REM Output: one VM name per line (no header, no decoration).
-    set "HYPERV_TMP=%TEMP%\~hyperv_list_!RANDOM!.tmp"
-    powershell -NoProfile -Command "Get-VM | Where-Object { $_.State -eq 'Running' } | ForEach-Object { Write-Output $_.VMName }" > "!HYPERV_TMP!" 2>&1
+    powershell -NoProfile -Command "Get-VM | Where-Object { $_.State -eq 'Running' } | ForEach-Object { Write-Output $_.VMName }" > "%TEMP%\hyperv_list.tmp" 2>nul
 
     if !errorlevel! neq 0 (
         call :Warn "PowerShell Get-VM returned an error while listing Hyper-V VMs."
         call :Warn "Ensure Hyper-V Virtual Machine Management service is running."
-        type "!HYPERV_TMP!" >> "!LOG_FILE!"
+        type "%TEMP%\hyperv_list.tmp" >> "!LOG_FILE!"
     ) else (
         set "PARSE_COUNT=0"
-        for /f "usebackq tokens=*" %%L in ("!HYPERV_TMP!") do (
+        for /f "usebackq tokens=*" %%L in ("%TEMP%\hyperv_list.tmp") do (
             set "VM_NAME=%%L"
             REM Skip empty lines and PowerShell error lines that may leak
             if not "!VM_NAME!"=="" (
@@ -316,7 +318,7 @@ if "!HYPERV_FOUND!"=="YES" (
             call :Info "  No running Hyper-V VMs detected."
         )
     )
-    del /f /q "!HYPERV_TMP!" >nul 2>&1
+    del /f /q "%TEMP%\hyperv_list.tmp" >nul 2>&1
 )
 
 :: --- VMware: discover running VMs ---
@@ -422,13 +424,13 @@ if "!VBOX_FOUND!"=="YES" (
 )
 
 if "!HYPERV_FOUND!"=="YES" (
-    set "HYPERV_VERIFY=%TEMP%\~hyperv_verify_!RANDOM!.tmp"
-    powershell -NoProfile -Command "(Get-VM | Where-Object { $_.State -eq 'Running' }).Count" > "!HYPERV_VERIFY!" 2>&1
-    set /p HYPERV_RUNNING=<"!HYPERV_VERIFY!"
+    powershell -NoProfile -Command "(Get-VM | Where-Object { $_.State -eq 'Running' }).Count" > "%TEMP%\hyperv_verify.tmp" 2>nul
+    set "HYPERV_RUNNING="
+    for /f "usebackq tokens=*" %%R in ("%TEMP%\hyperv_verify.tmp") do set "HYPERV_RUNNING=%%R"
+    del /f /q "%TEMP%\hyperv_verify.tmp" >nul 2>&1
     REM Sanitise: if the output isn't purely numeric, treat as 0
     echo !HYPERV_RUNNING! | findstr /r "^[0-9][0-9]*$" >nul 2>&1
     if !errorlevel! equ 0 set /a REMAINING+=!HYPERV_RUNNING!
-    del /f /q "!HYPERV_VERIFY!" >nul 2>&1
 )
 
 if "!VMWARE_FOUND!"=="YES" (
@@ -605,10 +607,10 @@ exit /b
     set "HV_ELAPSED=0"
 
     REM Pre-check: is the VM actually running?
-    set "HV_PRE_CHECK=%TEMP%\~hyperv_pre_!RANDOM!.tmp"
-    powershell -NoProfile -Command "if ((Get-VM -Name '%HV_NAME%').State -eq 'Running') { 'YES' } else { 'NO' }" > "!HV_PRE_CHECK!" 2>&1
-    set /p HV_PRE_STATE=<"!HV_PRE_CHECK!"
-    del /f /q "!HV_PRE_CHECK!" >nul 2>&1
+    powershell -NoProfile -Command "if ((Get-VM -Name '%HV_NAME%').State -eq 'Running') { 'YES' } else { 'NO' }" > "%TEMP%\hyperv_pre.tmp" 2>nul
+    set "HV_PRE_STATE="
+    for /f "usebackq tokens=*" %%R in ("%TEMP%\hyperv_pre.tmp") do set "HV_PRE_STATE=%%R"
+    del /f /q "%TEMP%\hyperv_pre.tmp" >nul 2>&1
 
     if /i "!HV_PRE_STATE!"=="NO" (
         call :OK "  Hyper-V VM '%HV_NAME%' is already powered off."
@@ -632,10 +634,10 @@ exit /b
         timeout /t %CFG_CHECK_INTERVAL% /nobreak >nul
         set /a HV_ELAPSED+=%CFG_CHECK_INTERVAL%
 
-        set "HV_STATE_TMP=%TEMP%\~hyperv_state_!RANDOM!.tmp"
-        powershell -NoProfile -Command "(Get-VM -Name '%HV_NAME%').State" > "!HV_STATE_TMP!" 2>&1
-        set /p HV_STATE=<"!HV_STATE_TMP!"
-        del /f /q "!HV_STATE_TMP!" >nul 2>&1
+        powershell -NoProfile -Command "(Get-VM -Name '%HV_NAME%').State" > "%TEMP%\hyperv_state.tmp" 2>nul
+        set "HV_STATE="
+        for /f "usebackq tokens=*" %%R in ("%TEMP%\hyperv_state.tmp") do set "HV_STATE=%%R"
+        del /f /q "%TEMP%\hyperv_state.tmp" >nul 2>&1
 
         if /i "!HV_STATE!"=="Off" (
             call :OK "  Hyper-V VM '%HV_NAME%' powered off successfully. (!HV_ELAPSED!s)"
